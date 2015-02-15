@@ -1075,7 +1075,8 @@ CV_EXPORTS Ptr<cv::gpu::CLAHE> createCLAHE(double clipLimit = 40.0, Size tileGri
 class CV_EXPORTS StereoBM_GPU
 {
 public:
-    enum { BASIC_PRESET = 0, PREFILTER_XSOBEL = 1 };
+    enum { BASIC_PRESET = 0, PREFILTER_XSOBEL = 1,
+        FLOAT_DISPARITY = 2, XSOBEL_FLOAT_DISPARITY = 3 };
 
     enum { DEFAULT_NDISP = 64, DEFAULT_WINSZ = 19 };
 
