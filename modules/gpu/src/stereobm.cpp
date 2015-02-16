@@ -60,6 +60,7 @@ namespace cv { namespace gpu { namespace device
     namespace stereobm
     {
         void stereoBM_GPU(const PtrStepSzb& left, const PtrStepSzb& right, const PtrStepSzb& disp, int ndisp, int winsz, const PtrStepSz<unsigned int>& minSSD_buf, cudaStream_t & stream);
+        void refineBM_GPU(const PtrStepSzb& left, const PtrStepSzb& right, const PtrStepSzb& disp, const int ndisp, int winsz, const PtrStepSzf& out_disp, const cudaStream_t& stream);
         void prefilter_xsobel(const PtrStepSzb& input, const PtrStepSzb& output, int prefilterCap /*= 31*/, cudaStream_t & stream);
         void postfilter_textureness(const PtrStepSzb& input, int winsz, float avgTexturenessThreshold, const PtrStepSzb& disp, cudaStream_t & stream);
     }
@@ -135,8 +136,8 @@ namespace
         if (avergeTexThreshold)
             postfilter_textureness(le_for_bm, winSize, avergeTexThreshold, disparity, stream);
         if (preset & StereoBM_GPU::FLOAT_DISPARITY) {
-            //refineBM_GPU(le_for_bm, ri_for_bm, disparity, ndisp, winSize, float_disparity, stream);
-            float_disparity = disparity;
+            refineBM_GPU(le_for_bm, ri_for_bm, disparity, ndisp, winSize, float_disparity, stream);
+            //float_disparity = disparity;
             disparity = float_disparity;
         }
     }

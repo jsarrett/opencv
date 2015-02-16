@@ -59,6 +59,9 @@ namespace cv { namespace gpu { namespace device
 
         #define STEREO_MIND 0                    // The minimum d range to check
         #define STEREO_DISP_STEP N_DISPARITIES   // the d step, must be <= 1 to avoid aliasing
+        
+        #define REFINE_BLOCK_W 8          // floating pt refinement thread block width (max 512 on CC1.X)
+        #define REFINE_BLOCK_H 8          // floating pt refinement thread block height (max 512 on CC1.X)
 
         __constant__ unsigned int* cminSSDImage;
         __constant__ size_t cminSSD_step;
@@ -365,6 +368,123 @@ namespace cv { namespace gpu { namespace device
 
             callers[winsz2](left, right, disp, maxdisp, stream);
         }
+
+
+        //////////////////////////////////////////////////////////////////////////////////////////////////
+        ////////////////////////////////// Floating point refinement /////////////////////////////////////
+        //////////////////////////////////////////////////////////////////////////////////////////////////
+
+        //calculate an SSD given upper left pointers of two images
+        template<int RADIUS>
+        __device__ unsigned int CalcSSDwindow(volatile unsigned char *left, volatile unsigned char *right, const ssize_t stride) {
+            unsigned int ssd = 0;
+
+            for(int c = 0; c <= 2*RADIUS; c++) {
+                for (int r = 0; r <= 2*RADIUS; r++) {
+                    int i = r*stride + c;
+                    ssd += SQ((int)left[i] - (int)right[i]);
+                }
+            }
+            return ssd;
+        };
+
+        template<int RADIUS>
+        __global__ void BMrefineKernel(unsigned char *left, unsigned char *right, size_t img_step, PtrStepb disp, PtrStepf finedisp) {
+            int x = blockIdx.x*blockDim.x + threadIdx.x;
+            int y = blockIdx.y*blockDim.y + threadIdx.y;
+
+            if ((x >= cwidth) || (y >= cheight)) {
+                return;
+            }
+            else {
+                int cur_disp = disp(y, x);
+                //default to un-refined result
+                finedisp(y,x) = (float)cur_disp;
+
+                int top = y - RADIUS;
+                int bot = y + RADIUS+1;
+                int l_edgL = x - RADIUS;
+                int l_edgR = x + (RADIUS+1);
+                int x_r = x - cur_disp;
+                //we slide the window in the right image, so start at -1
+                int r_edgL = x_r - RADIUS - 1;
+                int r_edgR = x_r + (RADIUS+1) + 1;
+
+                //if disparity was found (opencv says valid match)
+                //check disparity/right co-ords are in-bounds
+                //and left co-ords are in bounds
+                if ((cur_disp != 0) && (top >= 0) && (bot < cheight) &&
+                        (r_edgL >= 0) && (r_edgR < cwidth) &&
+                        (l_edgL >= 0) && (l_edgR < cwidth)) {
+                    unsigned int ssd_l = CalcSSDwindow<RADIUS>(left + l_edgL + top*img_step,
+                            right + (r_edgL + 0) + top*img_step, img_step);
+                    unsigned int ssd_c = CalcSSDwindow<RADIUS>(left + l_edgL + top*img_step,
+                            right + (r_edgL + 1) + top*img_step, img_step);
+                    unsigned int ssd_r = CalcSSDwindow<RADIUS>(left + l_edgL + top*img_step,
+                            right + (r_edgL + 2) + top*img_step, img_step);
+
+                    float a = ((float)ssd_l + (float)ssd_r)/2.0f - (float)ssd_c;
+                    float b = ((float)ssd_r - (float)ssd_l)/2.0f;
+                    float d = a + fabs(b);
+                    if ((a > 0.0f) && (fabs(d) > 1.0f)) {
+                        finedisp(y,x) = b/d + (float)cur_disp;
+                    }
+                }
+            }
+        };
+
+
+        template<int RADIUS> void refine_kernel_caller(const PtrStepSzb& left, const PtrStepSzb& right, const PtrStepSzb& disp, const PtrStepSzf& out_disp, const cudaStream_t& stream) {
+            dim3 grid(1,1,1);
+            dim3 threads(REFINE_BLOCK_W, REFINE_BLOCK_H, 1);
+            size_t smem_size = 0;
+
+            grid.x = (int)ceil((double)out_disp.cols/(double)REFINE_BLOCK_W);
+            grid.y = (int)ceil((double)out_disp.rows/(double)REFINE_BLOCK_H);
+
+            //See above:  #define COL_SSD_SIZE (BLOCK_W + 2 * RADIUS)
+            //size_t smem_size = (BLOCK_W + N_DISPARITIES * (BLOCK_W + 2 * RADIUS)) * sizeof(unsigned int);
+
+            BMrefineKernel<RADIUS><<<grid, threads, smem_size, stream>>>(left.data, right.data, left.step, disp, out_disp);
+            cudaSafeCall( cudaGetLastError() );
+
+            if (stream == 0)
+                cudaSafeCall( cudaDeviceSynchronize() );
+        };
+
+        typedef void (*refine_kernel_caller_t)(const PtrStepSzb& left, const PtrStepSzb& right, const PtrStepSzb& disp, const PtrStepSzf& out_disp, const cudaStream_t& stream);
+
+        const static refine_kernel_caller_t refine_callers[] =
+        {
+            0,
+            refine_kernel_caller< 1>, refine_kernel_caller< 2>, refine_kernel_caller< 3>,
+            refine_kernel_caller< 4>, refine_kernel_caller< 5>, refine_kernel_caller< 6>,
+            refine_kernel_caller< 7>, refine_kernel_caller< 8>, refine_kernel_caller< 9>,
+            refine_kernel_caller<10>, refine_kernel_caller<11>, refine_kernel_caller<12>,
+            refine_kernel_caller<13>, refine_kernel_caller<15>, refine_kernel_caller<15>,
+            refine_kernel_caller<16>, refine_kernel_caller<17>, refine_kernel_caller<18>,
+            refine_kernel_caller<19>, refine_kernel_caller<20>, refine_kernel_caller<21>,
+            refine_kernel_caller<22>, refine_kernel_caller<23>, refine_kernel_caller<24>,
+            refine_kernel_caller<25>
+
+            //0,0,0, 0,0,0, 0,0,refine_kernel_caller<9>
+        };
+        const int refine_callers_num = sizeof(refine_callers)/sizeof(refine_callers[0]);
+
+        void refineBM_GPU(const PtrStepSzb& left, const PtrStepSzb& right, const PtrStepSzb& disp, const int ndisp, int winsz, const PtrStepSzf& out_disp, const cudaStream_t& stream) {
+            int winsz2 = winsz >> 1;
+
+            if (winsz2 == 0 || winsz2 >= refine_callers_num)
+                error("Unsupported window size", __FILE__, __LINE__, "BMrefine_GPU");
+
+            //cudaSafeCall( cudaFuncSetCacheConfig(&stereoKernel, cudaFuncCachePreferL1) );
+            //cudaSafeCall( cudaFuncSetCacheConfig(&stereoKernel, cudaFuncCachePreferShared) );
+
+            cudaSafeCall( cudaMemset2D(out_disp.data, out_disp.step, 0.0f, out_disp.cols, out_disp.rows) );
+
+            refine_callers[winsz2](left, right, disp, out_disp, stream);
+        }
+
 
         //////////////////////////////////////////////////////////////////////////////////////////////////
         /////////////////////////////////////// Sobel Prefiler ///////////////////////////////////////////
