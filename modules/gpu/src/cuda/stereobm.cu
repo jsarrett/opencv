@@ -388,6 +388,27 @@ namespace cv { namespace gpu { namespace device
             return ssd;
         };
 
+        //calculate an SSD given upper left pointers of two images
+        template<int RADIUS>
+        __device__ uint3 CalcSSDwindow_lcr(volatile unsigned char *left, volatile unsigned char *right, const ssize_t stride) {
+            uint3 ssd = make_uint3(0,0,0);
+
+            volatile unsigned char * L;
+            volatile unsigned char * R;
+            for (int row = 0; row <= 2*RADIUS; row++) {
+                L = left + row*stride;
+                R = right + row*stride;
+                for(int col = 0; col <= 2*RADIUS; col++) {
+                    ssd.x += SQ((int)L[0] - (int)R[0]);
+                    ssd.y += SQ((int)L[0] - (int)R[1]);
+                    ssd.z += SQ((int)L[0] - (int)R[2]);
+                    L++;
+                    R++;
+                }
+            }
+            return ssd;
+        };
+
         template<int RADIUS>
         __global__ void BMrefineKernel(unsigned char *left, unsigned char *right, size_t img_step, PtrStepb disp, PtrStepf finedisp) {
             int x = blockIdx.x*blockDim.x + threadIdx.x;
