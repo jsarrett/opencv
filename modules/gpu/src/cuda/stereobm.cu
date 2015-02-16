@@ -379,8 +379,8 @@ namespace cv { namespace gpu { namespace device
         __device__ unsigned int CalcSSDwindow(volatile unsigned char *left, volatile unsigned char *right, const ssize_t stride) {
             unsigned int ssd = 0;
 
-            for(int c = 0; c <= 2*RADIUS; c++) {
-                for (int r = 0; r <= 2*RADIUS; r++) {
+            for (int r = 0; r <= 2*RADIUS; r++) {
+                for(int c = 0; c <= 2*RADIUS; c++) {
                     int i = r*stride + c;
                     ssd += SQ((int)left[i] - (int)right[i]);
                 }
@@ -389,70 +389,68 @@ namespace cv { namespace gpu { namespace device
         };
 
         template<int RADIUS>
-        __global__ void BMrefineKernel(unsigned char *left, unsigned char *right, size_t img_step, PtrStepb disp, PtrStepf finedisp) {
-            int x = blockIdx.x*blockDim.x + threadIdx.x;
-            int y = blockIdx.y*blockDim.y + threadIdx.y;
+        __global__ void BMrefineKernel(unsigned char *left, unsigned char *right, size_t img_step, PtrStepb disp, PtrStepf finedisp, int ndisp) {
+            int x = blockIdx.x*blockDim.x + threadIdx.x + ndisp + RADIUS;
+            int y = blockIdx.y*ROWSperTHREAD + RADIUS;
 
-            if ((x >= cwidth) || (y >= cheight)) {
-                return;
-            }
-            else {
-                int cur_disp = disp(y, x);
-                //default to un-refined result
-                finedisp(y,x) = (float)cur_disp;
+            int end_row = ::min(ROWSperTHREAD, cheight - Y - RADIUS);
+            if ((x < cwidth) && (y < cheight)) {
+                for(int r=1; r<end_row; r++){
+                    int cur_disp = disp(y+r, x);
+                    //default to un-refined result
+                    finedisp(y+r,x) = (float)cur_disp;
 
-                int top = y - RADIUS;
-                int bot = y + RADIUS+1;
-                int l_edgL = x - RADIUS;
-                int l_edgR = x + (RADIUS+1);
-                int x_r = x - cur_disp;
-                //we slide the window in the right image, so start at -1
-                int r_edgL = x_r - RADIUS - 1;
-                int r_edgR = x_r + (RADIUS+1) + 1;
+                    int top = y + r - RADIUS;
+                    int bot = y + r + RADIUS;
+                    int l_edgL = x - RADIUS;
+                    int l_edgR = x + RADIUS;
+                    int x_r = x - cur_disp;
+                    //we slide the window in the right image, so start at -1
+                    int r_edgL = x_r - RADIUS - 1;
+                    // only used for bounds check, use fully shifted version
+                    int r_edgR = x_r + RADIUS + 1;
 
-                //if disparity was found (opencv says valid match)
-                //check disparity/right co-ords are in-bounds
-                //and left co-ords are in bounds
-                if ((cur_disp != 0) && (top >= 0) && (bot < cheight) &&
-                        (r_edgL >= 0) && (r_edgR < cwidth) &&
-                        (l_edgL >= 0) && (l_edgR < cwidth)) {
-                    unsigned int ssd_l = CalcSSDwindow<RADIUS>(left + l_edgL + top*img_step,
-                            right + (r_edgL + 0) + top*img_step, img_step);
-                    unsigned int ssd_c = CalcSSDwindow<RADIUS>(left + l_edgL + top*img_step,
-                            right + (r_edgL + 1) + top*img_step, img_step);
-                    unsigned int ssd_r = CalcSSDwindow<RADIUS>(left + l_edgL + top*img_step,
-                            right + (r_edgL + 2) + top*img_step, img_step);
+                    //if disparity was found (opencv says valid match)
+                    //check disparity/right co-ords are in-bounds
+                    //and left co-ords are in bounds
+                    if ((cur_disp != 0) && (top >= 0) && (bot < cheight) &&
+                            (r_edgL >= 0) && (r_edgR < cwidth) &&
+                            (l_edgL >= 0) && (l_edgR < cwidth)) {
+                        unsigned int ssd_l = CalcSSDwindow<RADIUS>(left + l_edgL + top*img_step,
+                                right + (r_edgL + 0) + top*img_step, img_step);
+                        unsigned int ssd_c = CalcSSDwindow<RADIUS>(left + l_edgL + top*img_step,
+                                right + (r_edgL + 1) + top*img_step, img_step);
+                        unsigned int ssd_r = CalcSSDwindow<RADIUS>(left + l_edgL + top*img_step,
+                                right + (r_edgL + 2) + top*img_step, img_step);
 
-                    float a = ((float)ssd_l + (float)ssd_r)/2.0f - (float)ssd_c;
-                    float b = ((float)ssd_r - (float)ssd_l)/2.0f;
-                    float d = a + fabs(b);
-                    if ((a > 0.0f) && (fabs(d) > 1.0f)) {
-                        finedisp(y,x) = b/d + (float)cur_disp;
+                        float a = ((float)ssd_l + (float)ssd_r)/2.0f - (float)ssd_c;
+                        float b = ((float)ssd_r - (float)ssd_l)/2.0f;
+                        float d = a + fabs(b);
+                        if ((a > 0.0f) && (fabs(d) > 1.0f)) {
+                            finedisp(y+r,x) = b/d + (float)cur_disp;
+                        }
                     }
                 }
             }
         };
 
 
-        template<int RADIUS> void refine_kernel_caller(const PtrStepSzb& left, const PtrStepSzb& right, const PtrStepSzb& disp, const PtrStepSzf& out_disp, const cudaStream_t& stream) {
+        template<int RADIUS> void refine_kernel_caller(const PtrStepSzb& left, const PtrStepSzb& right, const PtrStepSzb& disp, const PtrStepSzf& out_disp, int ndisp, const cudaStream_t& stream) {
             dim3 grid(1,1,1);
-            dim3 threads(REFINE_BLOCK_W, REFINE_BLOCK_H, 1);
+            dim3 threads(BLOCK_W, 1, 1);
             size_t smem_size = 0;
 
-            grid.x = (int)ceil((double)out_disp.cols/(double)REFINE_BLOCK_W);
-            grid.y = (int)ceil((double)out_disp.rows/(double)REFINE_BLOCK_H);
+            grid.x = divUp(left.cols - ndisp - 2 * RADIUS, BLOCK_W);
+            grid.y = divUp(left.rows - 2 * RADIUS, ROWSperTHREAD);
 
-            //See above:  #define COL_SSD_SIZE (BLOCK_W + 2 * RADIUS)
-            //size_t smem_size = (BLOCK_W + N_DISPARITIES * (BLOCK_W + 2 * RADIUS)) * sizeof(unsigned int);
-
-            BMrefineKernel<RADIUS><<<grid, threads, smem_size, stream>>>(left.data, right.data, left.step, disp, out_disp);
+            BMrefineKernel<RADIUS><<<grid, threads, smem_size, stream>>>(left.data, right.data, left.step, disp, out_disp, ndisp);
             cudaSafeCall( cudaGetLastError() );
 
             if (stream == 0)
                 cudaSafeCall( cudaDeviceSynchronize() );
         };
 
-        typedef void (*refine_kernel_caller_t)(const PtrStepSzb& left, const PtrStepSzb& right, const PtrStepSzb& disp, const PtrStepSzf& out_disp, const cudaStream_t& stream);
+        typedef void (*refine_kernel_caller_t)(const PtrStepSzb& left, const PtrStepSzb& right, const PtrStepSzb& disp, const PtrStepSzf& out_disp, int ndisp, const cudaStream_t& stream);
 
         const static refine_kernel_caller_t refine_callers[] =
         {
@@ -477,12 +475,11 @@ namespace cv { namespace gpu { namespace device
             if (winsz2 == 0 || winsz2 >= refine_callers_num)
                 error("Unsupported window size", __FILE__, __LINE__, "BMrefine_GPU");
 
-            //cudaSafeCall( cudaFuncSetCacheConfig(&stereoKernel, cudaFuncCachePreferL1) );
-            //cudaSafeCall( cudaFuncSetCacheConfig(&stereoKernel, cudaFuncCachePreferShared) );
-
+            cudaSafeCall( cudaMemcpyToSymbol( cwidth, &left.cols, sizeof(left.cols) ) );
+            cudaSafeCall( cudaMemcpyToSymbol( cheight, &left.rows, sizeof(left.rows) ) );
             cudaSafeCall( cudaMemset2D(out_disp.data, out_disp.step, 0.0f, out_disp.cols, out_disp.rows) );
 
-            refine_callers[winsz2](left, right, disp, out_disp, stream);
+            refine_callers[winsz2](left, right, disp, out_disp, ndisp, stream);
         }
 
 
