@@ -60,8 +60,8 @@ namespace cv { namespace gpu { namespace device
         #define STEREO_MIND 0                    // The minimum d range to check
         #define STEREO_DISP_STEP N_DISPARITIES   // the d step, must be <= 1 to avoid aliasing
         
-        #define REFINE_BLOCK_W 8          // floating pt refinement thread block width (max 512 on CC1.X)
-        #define REFINE_BLOCK_H 8          // floating pt refinement thread block height (max 512 on CC1.X)
+        #define REFINE_BLOCK_W 128          // floating pt refinement thread block width (max 512 on CC1.X)
+        #define REFINE_BLOCK_H 1          // floating pt refinement thread block height (max 512 on CC1.X)
 
         __constant__ unsigned int* cminSSDImage;
         __constant__ size_t cminSSD_step;
