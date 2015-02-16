@@ -379,8 +379,8 @@ namespace cv { namespace gpu { namespace device
         __device__ unsigned int CalcSSDwindow(volatile unsigned char *left, volatile unsigned char *right, const ssize_t stride) {
             unsigned int ssd = 0;
 
-            for(int c = 0; c <= 2*RADIUS; c++) {
-                for (int r = 0; r <= 2*RADIUS; r++) {
+            for (int r = 0; r <= 2*RADIUS; r++) {
+                for(int c = 0; c <= 2*RADIUS; c++) {
                     int i = r*stride + c;
                     ssd += SQ((int)left[i] - (int)right[i]);
                 }
