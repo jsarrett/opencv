@@ -413,17 +413,23 @@ namespace cv { namespace gpu { namespace device
         __device__ uint3 CalcSSDwindow_lcr(const unsigned char *left, const size_t l_stride, const unsigned char *right, const size_t r_stride) {
             uint3 ssd = make_uint3(0,0,0);
 
-            const unsigned char * L;
-            const unsigned char * R;
             for (int row = 0; row <= 2*RADIUS; row++) {
-                L = left + row*l_stride;
-                R = right + row*r_stride;
                 for(int col = 0; col <= 2*RADIUS; col++) {
-                    ssd.x += SQ((int)L[0] - (int)R[0]);
-                    ssd.y += SQ((int)L[0] - (int)R[1]);
-                    ssd.z += SQ((int)L[0] - (int)R[2]);
-                    L++;
-                    R++;
+#define SPREAD_ACCESS 1
+#if SPREAD_ACCESS
+                    unsigned int r = (row + threadIdx.x) % (2*RADIUS+1);
+                    //unsigned int r = row;
+                    //unsigned int c = (col + threadIdx.y) % (2*RADIUS+1);
+                    unsigned int c = col;
+                    unsigned int li = r*l_stride + c;
+                    unsigned int ri = r*r_stride + c;
+#else
+                    unsigned int li = row*l_stride + col;
+                    unsigned int ri = row*r_stride + col;
+#endif
+                    ssd.x += SQ((int)left[li] - (int)right[ri+0]);
+                    ssd.y += SQ((int)left[li] - (int)right[ri+1]);
+                    ssd.z += SQ((int)left[li] - (int)right[ri+2]);
                 }
             }
             return ssd;
