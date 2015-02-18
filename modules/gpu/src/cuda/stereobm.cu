@@ -60,8 +60,9 @@ namespace cv { namespace gpu { namespace device
         #define STEREO_MIND 0                    // The minimum d range to check
         #define STEREO_DISP_STEP N_DISPARITIES   // the d step, must be <= 1 to avoid aliasing
         
-        #define REFINE_BLOCK_W 128          // floating pt refinement thread block width (max 512 on CC1.X)
-        #define REFINE_BLOCK_H 1          // floating pt refinement thread block height (max 512 on CC1.X)
+        #define REFINE_BLOCK_W 128         // floating pt refinement thread block width (max 512 on CC1.X)
+        #define REFINE_BLOCK_H 4           // floating pt refinement thread block height (max 512 on CC1.X)
+        #define LOOPS 8
 
         __constant__ unsigned int* cminSSDImage;
         __constant__ size_t cminSSD_step;
@@ -437,7 +438,7 @@ namespace cv { namespace gpu { namespace device
             const unsigned int l_cache_w = blockDim.x + (2*RADIUS) - max(0, (int)blockDim.x*((int)blockIdx.x+1) - (int)cwidth);
             //right image cache holds blockDim + ndisp + 2 pixels with RADIUS pixels around it minus the overrun
             const unsigned int r_cache_w = blockDim.x + (ndisp+2) + (2*RADIUS) - max(0, (int)blockDim.x*((int)blockIdx.x+1) - (int)cwidth);
-            const unsigned int lr_height = blockDim.y + 2*RADIUS;
+            const unsigned int lr_height = LOOPS*blockDim.y + 2*RADIUS;
             //const unsigned int disp_w = blockDim.x;
             //const unsigned int disp_h = blockDim.y;
 
@@ -445,8 +446,8 @@ namespace cv { namespace gpu { namespace device
             unsigned char * const r_cache = img_cache + l_cache_w*lr_height;
 
             //left region starts ndisp in, since left[x]-disparity = right[x]
-            const unsigned char * l_block = left + (blockIdx.y*blockDim.y)*img_step + (blockIdx.x*blockDim.x) + ndisp;
-            const unsigned char * r_block = right + (blockIdx.y*blockDim.y)*img_step + (blockIdx.x*blockDim.x);
+            const unsigned char * l_block = left + (blockIdx.y*(LOOPS*blockDim.y))*img_step + (blockIdx.x*blockDim.x) + ndisp;
+            const unsigned char * r_block = right + (blockIdx.y*(LOOPS*blockDim.y))*img_step + (blockIdx.x*blockDim.x);
 
             __syncthreads();
             fillcache(l_block, img_step, l_cache, l_cache_w, l_cache_w, lr_height);
@@ -456,18 +457,20 @@ namespace cv { namespace gpu { namespace device
             //fillcache(disp.data, disp.stride, img_cache + left_w + right_w, img_cache_w, disp_w, disp_h);
             //__syncthreads();
 
+            for (int loop = 0; loop < LOOPS; loop++) {
+                //__syncthreads();
             int x = blockIdx.x*blockDim.x + threadIdx.x + RADIUS+ndisp+1;
-            int y = blockIdx.y*blockDim.y + threadIdx.y + RADIUS;
+            int y = blockIdx.y*(blockDim.y*LOOPS) + (threadIdx.y + loop*blockDim.y) + RADIUS;
 
             if ((x >= (cwidth - 2 - RADIUS)) || (y >= (cheight - RADIUS))) {
-                return;
+                continue;
             }
             else {
                 int cur_disp = disp(y, x);
 
-                int l_top = l_cache_w*threadIdx.y;
+                int l_top = l_cache_w*(threadIdx.y + loop*blockDim.y);
                 int l_edgL = threadIdx.x;
-                int r_top = r_cache_w*threadIdx.y;
+                int r_top = r_cache_w*(threadIdx.y + loop*blockDim.y);
                 int x_r = threadIdx.x + ndisp - cur_disp;
                 //we slide the window in the right image, so start at -1
                 int r_edgL = x_r - 1;
@@ -495,6 +498,7 @@ namespace cv { namespace gpu { namespace device
                 float _bd_ = ((a > 0.0f) && (fabs(d) > 1.0f) && (cur_disp != 0))? 1.0f : 0.0f;
                 finedisp(y,x) = (b/d*_bd_) + (float)cur_disp;
             }
+            }
         };
 
 
@@ -504,11 +508,12 @@ namespace cv { namespace gpu { namespace device
             size_t smem_size = 0;
 
             grid.x = (int)ceil((double)(out_disp.cols - (ndisp+2) - (2*RADIUS+1))/(double)REFINE_BLOCK_W);
-            grid.y = (int)ceil((double)(out_disp.rows - (2*RADIUS+1))/(double)REFINE_BLOCK_H);
+            grid.y = (int)ceil((double)(out_disp.rows - (2*RADIUS+1))/(double)(LOOPS*REFINE_BLOCK_H));
 
             //See above:  #define COL_SSD_SIZE (BLOCK_W + 2 * RADIUS)
-            smem_size += (REFINE_BLOCK_W + 2*RADIUS) * (REFINE_BLOCK_H + 2*RADIUS) * sizeof(unsigned char); //left
-            smem_size += (REFINE_BLOCK_W + 2*RADIUS + ndisp + 2) * (REFINE_BLOCK_H + 2*RADIUS) * sizeof(unsigned char); //right
+            size_t cache_h = (LOOPS*REFINE_BLOCK_H + 2*RADIUS);
+            smem_size += (REFINE_BLOCK_W + 2*RADIUS) * cache_h * sizeof(unsigned char); //left
+            smem_size += (REFINE_BLOCK_W + 2*RADIUS + ndisp + 2) * cache_h * sizeof(unsigned char); //right
 //printf("g_x: %d, g_y: %d, t_x: %d, t_y: %d, smem_size:%zd\n", grid.x, grid.y, threads.x, threads.y, smem_size);
 
             BMrefineKernel<RADIUS><<<grid, threads, smem_size, stream>>>(left.data, right.data, left.step, ndisp, disp, out_disp);
