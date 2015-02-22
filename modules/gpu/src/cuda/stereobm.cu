@@ -259,7 +259,7 @@ namespace cv { namespace gpu { namespace device
             if (x_tex >= cwidth)
                 return;
 
-            for(int d = STEREO_MIND; d < maxdisp; d += STEREO_DISP_STEP - 2)
+            for(int d = STEREO_MIND; d < maxdisp; d += STEREO_DISP_STEP)
             {
                 y_tex = Y - RADIUS;
 
