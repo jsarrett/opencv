@@ -58,7 +58,7 @@ namespace cv { namespace gpu { namespace device
         #define N_DISPARITIES 8
 
         #define STEREO_MIND 0                    // The minimum d range to check
-        #define STEREO_DISP_STEP N_DISPARITIES   // the d step, must be <= 1 to avoid aliasing
+        #define STEREO_DISP_STEP (N_DISPARITIES-2)   // the d step, must be <= 1 to avoid aliasing
 
         __constant__ unsigned int* cminSSDImage;
         __constant__ size_t cminSSD_step;
@@ -93,7 +93,7 @@ namespace cv { namespace gpu { namespace device
         }
 
         template<int RADIUS>
-        __device__ uint2 MinSSD(volatile unsigned int *col_ssd_cache, volatile unsigned int *col_ssd)
+        __device__ uint4 MinSSD(volatile unsigned int *col_ssd_cache, volatile unsigned int *col_ssd)
         {
             unsigned int ssd[N_DISPARITIES];
 
@@ -114,16 +114,16 @@ namespace cv { namespace gpu { namespace device
             __syncthreads();
             ssd[7] = CalcSSD<RADIUS>(col_ssd_cache, col_ssd + 7 * (BLOCK_W + 2 * RADIUS));
 
-            int mssd = ::min(::min(::min(ssd[0], ssd[1]), ::min(ssd[4], ssd[5])), ::min(::min(ssd[2], ssd[3]), ::min(ssd[6], ssd[7])));
+            int mssd = ::min(::min(::min(ssd[1], ssd[2]), ::min(ssd[3], ssd[4])), ::min(ssd[5], ssd[6]));
 
-            int bestIdx = 0;
-            for (int i = 0; i < N_DISPARITIES; i++)
+            int bestIdx = 1;
+            for (int i = 1; i < N_DISPARITIES - 1; i++)
             {
                 if (mssd == ssd[i])
                     bestIdx = i;
             }
 
-            return make_uint2(mssd, bestIdx);
+            return make_uint4(mssd, bestIdx, ssd[bestIdx-1], ssd[bestIdx+1]);
         }
 
         template<int RADIUS>
@@ -229,7 +229,7 @@ namespace cv { namespace gpu { namespace device
         }
 
         template<int RADIUS>
-        __global__ void stereoKernel(unsigned char *left, unsigned char *right, size_t img_step, PtrStepb disp, int maxdisp)
+        __global__ void stereoKernel(unsigned char *left, unsigned char *right, size_t img_step, PtrStepb disp, PtrStepf fdisp, int maxdisp)
         {
             extern __shared__ unsigned int col_ssd_cache[];
             volatile unsigned int *col_ssd = col_ssd_cache + BLOCK_W + threadIdx.x;
@@ -243,6 +243,9 @@ namespace cv { namespace gpu { namespace device
 
             unsigned int* minSSDImage = cminSSDImage + X + Y * cminSSD_step;
             unsigned char* disparImage = disp.data + X + Y * disp.step;
+            
+            bool refine = (fdisp.data != 0);
+            //float* f_disparImage = (float*)((unsigned char*)fdisp.data + X*sizeof(float) + Y * fdisp.step);
          /*   if (X < cwidth)
             {
                 unsigned int *minSSDImage_end = minSSDImage + min(ROWSperTHREAD, cheight - Y) * minssd_step;
@@ -256,7 +259,7 @@ namespace cv { namespace gpu { namespace device
             if (x_tex >= cwidth)
                 return;
 
-            for(int d = STEREO_MIND; d < maxdisp; d += STEREO_DISP_STEP)
+            for(int d = STEREO_MIND; d < maxdisp; d += STEREO_DISP_STEP - 2)
             {
                 y_tex = Y - RADIUS;
 
@@ -270,11 +273,20 @@ namespace cv { namespace gpu { namespace device
 
                 if (X < cwidth - RADIUS && Y < cheight - RADIUS)
                 {
-                    uint2 minSSD = MinSSD<RADIUS>(col_ssd_cache + threadIdx.x, col_ssd);
+                    uint4 minSSD = MinSSD<RADIUS>(col_ssd_cache + threadIdx.x, col_ssd);
                     if (minSSD.x < minSSDImage[0])
                     {
                         disparImage[0] = (unsigned char)(d + minSSD.y);
                         minSSDImage[0] = minSSD.x;
+                        if (refine) {
+                            float a = ((float)minSSD.z + (float)minSSD.w)/2.0f - (float)minSSD.x;
+                            float b = ((float)minSSD.w - (float)minSSD.z)/2.0f;
+                            float denom = a + fabs(b);
+                            if ((a > 0.0f) && (fabs(denom) > 1.0f)) {
+                                //fdisp(Y,X) = b/denom + (float)(d + minSSD.y);
+                                fdisp(Y,X) = (float)(d + minSSD.y) - b/denom;
+                            }
+                        }
                     }
                 }
 
@@ -298,11 +310,20 @@ namespace cv { namespace gpu { namespace device
                     if (X < cwidth - RADIUS && row < cheight - RADIUS - Y)
                     {
                         int idx = row * cminSSD_step;
-                        uint2 minSSD = MinSSD<RADIUS>(col_ssd_cache + threadIdx.x, col_ssd);
+                        uint4 minSSD = MinSSD<RADIUS>(col_ssd_cache + threadIdx.x, col_ssd);
                         if (minSSD.x < minSSDImage[idx])
                         {
                             disparImage[disp.step * row] = (unsigned char)(d + minSSD.y);
                             minSSDImage[idx] = minSSD.x;
+                            if (refine) {
+                                float a = ((float)minSSD.z + (float)minSSD.w)/2.0f - (float)minSSD.x;
+                                float b = ((float)minSSD.w - (float)minSSD.z)/2.0f;
+                                float denom = a + fabs(b);
+                                if ((a > 0.0f) && (fabs(denom) > 1.0f)) {
+                                    //fdisp(Y+row,X) = b/denom + (float)(d + minSSD.y);
+                                    fdisp(Y+row,X) = (float)(d + minSSD.y) - b/denom;
+                                }
+                            }
                         }
                     }
                 } // for row loop
@@ -310,7 +331,7 @@ namespace cv { namespace gpu { namespace device
         }
 
 
-        template<int RADIUS> void kernel_caller(const PtrStepSzb& left, const PtrStepSzb& right, const PtrStepSzb& disp, int maxdisp, cudaStream_t & stream)
+        template<int RADIUS> void kernel_caller(const PtrStepSzb& left, const PtrStepSzb& right, const PtrStepSzb& disp, const PtrStepSzf& fdisp, int maxdisp, cudaStream_t & stream)
         {
             dim3 grid(1,1,1);
             dim3 threads(BLOCK_W, 1, 1);
@@ -321,14 +342,14 @@ namespace cv { namespace gpu { namespace device
             //See above:  #define COL_SSD_SIZE (BLOCK_W + 2 * RADIUS)
             size_t smem_size = (BLOCK_W + N_DISPARITIES * (BLOCK_W + 2 * RADIUS)) * sizeof(unsigned int);
 
-            stereoKernel<RADIUS><<<grid, threads, smem_size, stream>>>(left.data, right.data, left.step, disp, maxdisp);
+            stereoKernel<RADIUS><<<grid, threads, smem_size, stream>>>(left.data, right.data, left.step, disp, fdisp, maxdisp);
             cudaSafeCall( cudaGetLastError() );
 
             if (stream == 0)
                 cudaSafeCall( cudaDeviceSynchronize() );
         };
 
-        typedef void (*kernel_caller_t)(const PtrStepSzb& left, const PtrStepSzb& right, const PtrStepSzb& disp, int maxdisp, cudaStream_t & stream);
+        typedef void (*kernel_caller_t)(const PtrStepSzb& left, const PtrStepSzb& right, const PtrStepSzb& disp, const PtrStepSzf& fdisp, int maxdisp, cudaStream_t & stream);
 
         const static kernel_caller_t callers[] =
         {
@@ -343,7 +364,7 @@ namespace cv { namespace gpu { namespace device
         };
         const int calles_num = sizeof(callers)/sizeof(callers[0]);
 
-        void stereoBM_GPU(const PtrStepSzb& left, const PtrStepSzb& right, const PtrStepSzb& disp, int maxdisp, int winsz, const PtrStepSz<unsigned int>& minSSD_buf, cudaStream_t& stream)
+        void stereoBM_GPU(const PtrStepSzb& left, const PtrStepSzb& right, const PtrStepSzb& disp, const PtrStepSzf& fdisp, int maxdisp, int winsz, const PtrStepSz<unsigned int>& minSSD_buf, cudaStream_t& stream)
         {
             int winsz2 = winsz >> 1;
 
@@ -354,6 +375,8 @@ namespace cv { namespace gpu { namespace device
             //cudaSafeCall( cudaFuncSetCacheConfig(&stereoKernel, cudaFuncCachePreferShared) );
 
             cudaSafeCall( cudaMemset2D(disp.data, disp.step, 0, disp.cols, disp.rows) );
+            if (fdisp.data)
+            cudaSafeCall( cudaMemset2D(fdisp.data, fdisp.step, 0, disp.cols*fdisp.elemSize(), disp.rows) );
             cudaSafeCall( cudaMemset2D(minSSD_buf.data, minSSD_buf.step, 0xFF, minSSD_buf.cols * minSSD_buf.elemSize(), disp.rows) );
 
             cudaSafeCall( cudaMemcpyToSymbol( cwidth, &left.cols, sizeof(left.cols) ) );
@@ -363,7 +386,7 @@ namespace cv { namespace gpu { namespace device
             size_t minssd_step = minSSD_buf.step/minSSD_buf.elemSize();
             cudaSafeCall( cudaMemcpyToSymbol( cminSSD_step,  &minssd_step, sizeof(minssd_step) ) );
 
-            callers[winsz2](left, right, disp, maxdisp, stream);
+            callers[winsz2](left, right, disp, fdisp, maxdisp, stream);
         }
 
         //////////////////////////////////////////////////////////////////////////////////////////////////
