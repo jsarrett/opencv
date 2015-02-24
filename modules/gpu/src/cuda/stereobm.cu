@@ -93,9 +93,10 @@ namespace cv { namespace gpu { namespace device
         }
 
         template<int RADIUS>
-        __device__ uint4 MinSSD(volatile unsigned int *col_ssd_cache, volatile unsigned int *col_ssd)
+        __device__ uint3 MinSSD(volatile unsigned int *col_ssd_cache, volatile unsigned int *col_ssd)
         {
             unsigned int ssd[N_DISPARITIES];
+            float floatIdx = 0.0f;
 
             //See above:  #define COL_SSD_SIZE (BLOCK_W + 2 * RADIUS)
             ssd[0] = CalcSSD<RADIUS>(col_ssd_cache, col_ssd + 0 * (BLOCK_W + 2 * RADIUS));
@@ -122,8 +123,15 @@ namespace cv { namespace gpu { namespace device
                 if (mssd == ssd[i])
                     bestIdx = i;
             }
+            
+            float a = ((float)ssd[bestIdx-1] + (float)ssd[bestIdx+1])/2.0f - (float)ssd[bestIdx];
+            float b = ((float)ssd[bestIdx+1] - (float)ssd[bestIdx-1])/2.0f;
+            float denom = a + fabs(b);
+            if ((a > 0.0f) && (fabs(denom) > 1.0f)) {
+                floatIdx = (float)bestIdx - b/denom;
+            }
 
-            return make_uint4(mssd, bestIdx, ssd[bestIdx-1], ssd[bestIdx+1]);
+            return make_uint3(mssd, bestIdx, ((unsigned int*)&floatIdx)[0]);
         }
 
         template<int RADIUS>
@@ -273,19 +281,13 @@ namespace cv { namespace gpu { namespace device
 
                 if (X < cwidth - RADIUS && Y < cheight - RADIUS)
                 {
-                    uint4 minSSD = MinSSD<RADIUS>(col_ssd_cache + threadIdx.x, col_ssd);
+                    uint3 minSSD = MinSSD<RADIUS>(col_ssd_cache + threadIdx.x, col_ssd);
                     if (minSSD.x < minSSDImage[0])
                     {
                         disparImage[0] = (unsigned char)(d + minSSD.y);
                         minSSDImage[0] = minSSD.x;
                         if (refine) {
-                            float a = ((float)minSSD.z + (float)minSSD.w)/2.0f - (float)minSSD.x;
-                            float b = ((float)minSSD.w - (float)minSSD.z)/2.0f;
-                            float denom = a + fabs(b);
-                            if ((a > 0.0f) && (fabs(denom) > 1.0f)) {
-                                //fdisp(Y,X) = b/denom + (float)(d + minSSD.y);
-                                fdisp(Y,X) = (float)(d + minSSD.y) - b/denom;
-                            }
+                            fdisp(Y,X) = (float)d + ((float*)&minSSD.z)[0];
                         }
                     }
                 }
@@ -310,19 +312,13 @@ namespace cv { namespace gpu { namespace device
                     if (X < cwidth - RADIUS && row < cheight - RADIUS - Y)
                     {
                         int idx = row * cminSSD_step;
-                        uint4 minSSD = MinSSD<RADIUS>(col_ssd_cache + threadIdx.x, col_ssd);
+                        uint3 minSSD = MinSSD<RADIUS>(col_ssd_cache + threadIdx.x, col_ssd);
                         if (minSSD.x < minSSDImage[idx])
                         {
                             disparImage[disp.step * row] = (unsigned char)(d + minSSD.y);
                             minSSDImage[idx] = minSSD.x;
                             if (refine) {
-                                float a = ((float)minSSD.z + (float)minSSD.w)/2.0f - (float)minSSD.x;
-                                float b = ((float)minSSD.w - (float)minSSD.z)/2.0f;
-                                float denom = a + fabs(b);
-                                if ((a > 0.0f) && (fabs(denom) > 1.0f)) {
-                                    //fdisp(Y+row,X) = b/denom + (float)(d + minSSD.y);
-                                    fdisp(Y+row,X) = (float)(d + minSSD.y) - b/denom;
-                                }
+                                fdisp(Y+row,X) = (float)d + ((float*)&minSSD.z)[0];
                             }
                         }
                     }
