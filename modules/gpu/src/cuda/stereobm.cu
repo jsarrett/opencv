@@ -54,7 +54,8 @@ namespace cv { namespace gpu { namespace device
 
         #define ROWSperTHREAD 21     // the number of rows a thread will process
 
-        #define BLOCK_W 128          // the thread block width (464)
+        //#define BLOCK_W 128          // the thread block width (464)
+        #define BLOCK_W 96           // the thread block width (464)
         #define N_DISPARITIES 8
 
         #define STEREO_MIND 0                    // The minimum d range to check
